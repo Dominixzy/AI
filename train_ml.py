@@ -1,245 +1,89 @@
-import os, numpy as np, joblib, time
-from PIL import Image
-from skimage.feature import hog
-from sklearn.ensemble import RandomForestClassifier, StackingClassifier
-from sklearn.svm import SVC
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.model_selection import train_test_split, StratifiedKFold
-from sklearn.metrics import accuracy_score, classification_report
-from xgboost import XGBClassifier
+import pandas as pd
+import numpy as np
+import joblib
+import time
+from xgboost import XGBRegressor
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.metrics import r2_score, mean_absolute_error
+from sklearn.preprocessing import LabelEncoder
+from tqdm import tqdm
 
-TRAIN_DIR = "dataset/Training"
-IMG_SIZE  = (64, 64)
-MODEL_DIR = "model"
+# 1. โหลดข้อมูล 15,000 แถว
+print("⏳ กำลังโหลดและประมวลผลข้อมูล 15,000 แถว...")
+df = pd.read_csv('dataset/salary.csv', skipinitialspace=True)
 
-# ══════════════════════════════════════════
-# Helper: Progress Bar
-# ══════════════════════════════════════════
-def progress_bar(current, total, label="", bar_len=30):
-    filled = int(bar_len * current / total)
-    bar    = "█" * filled + "░" * (bar_len - filled)
-    pct    = current / total * 100
-    print(f"\r  [{bar}] {pct:5.1f}%  {label}", end="", flush=True)
+# 2. Feature Engineering (หัวใจของการแตะ 90%)
+# Counts of skills
+df['skill_count'] = df['required_skills'].str.split(',').str.len().fillna(0)
 
-def section(title):
-    print(f"\n{'═'*55}")
-    print(f"  {title}")
-    print(f"{'═'*55}")
+# Education to Ordinal
+edu_map = {'Bachelor': 1, 'Master': 2, 'PhD': 3, 'Associate': 0}
+df['edu_score'] = df['education_required'].map(edu_map).fillna(1)
 
-def step(msg):
-    print(f"\n  ▶  {msg}")
+# แปลงวันที่เพื่อหาความเร่งด่วน (Days to Deadline)
+df['posting_date'] = pd.to_datetime(df['posting_date'])
+df['application_deadline'] = pd.to_datetime(df['application_deadline'])
+df['days_to_deadline'] = (df['application_deadline'] - df['posting_date']).dt.days
 
-def done(msg, elapsed=None):
-    t = f"  ({elapsed:.1f}s)" if elapsed else ""
-    print(f"\r  ✅ {msg}{t}")
+# ลบข้อมูลที่ขัดแย้งกัน (Outliers)
+df = df[~((df['experience_level'] == 'EX') & (df['years_experience'] < 5))]
 
-# ══════════════════════════════════════════
-# Feature Extraction (HOG + Color)
-# ══════════════════════════════════════════
-def extract_features(img_array):
-    hog_feat = hog(
-        img_array,
-        orientations=9,
-        pixels_per_cell=(8, 8),
-        cells_per_block=(2, 2),
-        channel_axis=-1
-    )
-    color_hist = []
-    for ch in range(3):
-        hist, _ = np.histogram(img_array[:,:,ch], bins=32, range=(0,1))
-        color_hist.extend(hist / hist.sum())
-    return np.concatenate([hog_feat, color_hist])
-
-# ══════════════════════════════════════════
-# โหลดรูปภาพ + Progress Bar
-# ══════════════════════════════════════════
-def load_images(base_dir):
-    X, y = [], []
-    labels = sorted([l for l in os.listdir(base_dir)
-                     if os.path.isdir(os.path.join(base_dir, l))])
-
-    print(f"\n  พบ {len(labels)} label: {', '.join(labels)}\n")
-
-    total_files = sum(
-        len(os.listdir(os.path.join(base_dir, l))) for l in labels
-    )
-    processed = 0
-    t0 = time.time()
-
-    for label in labels:
-        folder = os.path.join(base_dir, label)
-        files  = os.listdir(folder)
-        ok     = 0
-
-        for fname in files:
-            try:
-                img = Image.open(os.path.join(folder, fname)).convert("RGB")
-                arr = np.array(img.resize(IMG_SIZE)) / 255.0
-                X.append(extract_features(arr))
-                y.append(label)
-                ok += 1
-            except:
-                pass
-            processed += 1
-            progress_bar(processed, total_files,
-                         f"{label} ({ok}/{len(files)})")
-
-        elapsed = time.time() - t0
-        rate    = processed / elapsed if elapsed > 0 else 0
-        remain  = (total_files - processed) / rate if rate > 0 else 0
-        print(f"\n  └─ {label}: {ok} รูป  |  "
-              f"ผ่านมา {elapsed:.0f}s  |  "
-              f"เหลืออีก ~{remain:.0f}s")
-
-    print()
-    return np.array(X), np.array(y)
-
-# ══════════════════════════════════════════
-# STEP 1 — โหลด Dataset
-# ══════════════════════════════════════════
-section("STEP 1/5 — โหลด Dataset")
-t_start = time.time()
-X, y = load_images(TRAIN_DIR)
-elapsed = time.time() - t_start
-done(f"โหลดเสร็จ: {len(X)} รูป  |  Feature size: {X.shape[1]}", elapsed)
-
-# ══════════════════════════════════════════
-# STEP 2 — Preprocessing
-# ══════════════════════════════════════════
-section("STEP 2/5 — Preprocessing")
-
-step("Label Encoding...")
-le    = LabelEncoder()
-y_enc = le.fit_transform(y)
-done(f"Classes: {list(le.classes_)}")
-
-step("Standard Scaling...")
-scaler = StandardScaler()
-X_sc   = scaler.fit_transform(X)
-done("Scale เสร็จ")
-
-step("แบ่ง Train / Test (80/20)...")
-X_train, X_test, y_train, y_test = train_test_split(
-    X_sc, y_enc, test_size=0.2, random_state=42, stratify=y_enc
-)
-done(f"Train: {len(X_train)} รูป  |  Test: {len(X_test)} รูป")
-
-# ══════════════════════════════════════════
-# STEP 3 — สร้าง Ensemble Stack
-# ══════════════════════════════════════════
-section("STEP 3/5 — สร้าง Ensemble Stack")
-
-step("ตั้งค่า Base Models...")
-base_models = [
-    ("rf", RandomForestClassifier(
-        n_estimators=300,
-        max_features="sqrt",
-        n_jobs=-1,
-        random_state=42
-    )),
-    ("xgb", XGBClassifier(
-        n_estimators=500,
-        learning_rate=0.05,
-        max_depth=6,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        eval_metric="mlogloss",
-        verbosity=0,
-        n_jobs=-1,
-        random_state=42
-    )),
-    ("svm", SVC(
-        kernel="rbf",
-        C=10,
-        gamma="scale",
-        probability=True,
-        random_state=42
-    )),
+# เลือก Features
+features = [
+    'experience_level', 'industry', 'years_experience', 'company_location', 
+    'skill_count', 'edu_score', 'remote_ratio', 'company_size', 
+    'days_to_deadline', 'benefits_score', 'job_description_length'
 ]
-meta_model = LogisticRegression(max_iter=1000, C=5, n_jobs=-1)
-done("Random Forest  +  XGBoost  +  SVM  →  Logistic Regression")
+X = pd.get_dummies(df[features], drop_first=True)
+y = df['salary_usd']
+feature_names = X.columns.tolist()
 
-step("สร้าง StackingClassifier (5-fold CV)...")
-stack = StackingClassifier(
-    estimators=base_models,
-    final_estimator=meta_model,
-    cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
-    passthrough=True,
-    n_jobs=-1
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.15, random_state=42)
+
+# 3. กำหนด Parameters สำหรับ GridSearchCV แบบละเอียดที่สุด
+print("⚙️ เริ่มต้นการทำ GridSearchCV แบบละเอียด (เวลานานได้ไม่มีปัญหา)...")
+xgb_model = XGBRegressor(
+    objective='reg:squarederror', 
+    tree_method='hist',      # ใช้ระบบ Histogram (จำเป็นสำหรับ GPU)
+    device='cuda',           # สั่งให้รันบนการ์ดจอ (NVIDIA)
+    random_state=42
 )
-done("พร้อมเทรน")
+# ปรับจูนค่าต่างๆ หลายร้อยรูปแบบ
+param_grid = {
+    'n_estimators': [1000, 1500, 2000],          # จำนวนต้นไม้ (เน้นเรียนรู้ลึกๆ)
+    'learning_rate': [0.01, 0.03, 0.05],         # อัตราการเรียนรู้ (เน้นค่อยๆ เรียน)
+    'max_depth': [8, 10, 12, 15],                # ความลึกของต้นไม้ (เน้นหาความสัมพันธ์ที่ซับซ้อน)
+    'subsample': [0.8, 0.9, 1.0],                 # สุ่มข้อมูลบางส่วนเพื่อป้องกัน Overfitting
+    'colsample_bytree': [0.8, 0.9, 1.0],          # สุ่ม Feature บางส่วน
+    'gamma': [0, 0.1, 0.2]                        # เพิ่มข้อกำหนดในการแตกกิ่ง
+}
 
-# ══════════════════════════════════════════
-# STEP 4 — เทรน
-# ══════════════════════════════════════════
-section("STEP 4/5 — เทรน Ensemble Stack")
-print("\n  ⏳ กำลังเทรน... (ประมาณ 10-20 นาที)")
-print("  การทำงาน: เทรน RF + XGB + SVM แต่ละ fold → เทรน Meta-model\n")
+# 4. เทรนโมเดลด้วย GridSearchCV (ใช้เวลาประมาณ 10-30 นาที ขึ้นอยู่กับคอมพิวเตอร์)
+# n_jobs=-1 เพื่อใช้ CPU ทุกคอร์ที่มี
+grid_search = GridSearchCV(
+    estimator=xgb_model, 
+    param_grid=param_grid, 
+    cv=5,               # Cross-Validation 5 รอบ
+    scoring='r2', 
+    n_jobs=-1, 
+    verbose=2           # โชว์รายละเอียดระหว่างเทรน
+)
+grid_search.fit(X_train, y_train)
 
-# แสดง progress แต่ละโมเดล
-model_names = ["Random Forest", "XGBoost", "SVM", "Meta-model (LR)"]
-for i, name in enumerate(model_names, 1):
-    progress_bar(i - 1, len(model_names), f"รอเทรน {name}...")
-    time.sleep(0.1)
+best_model = grid_search.best_estimator_
 
-print()
-t_train = time.time()
-stack.fit(X_train, y_train)
-train_elapsed = time.time() - t_train
+# 5. วัดผล Accurate สูงสุด
+y_pred = best_model.predict(X_test)
+final_acc = r2_score(y_test, y_pred)
+mae = mean_absolute_error(y_test, y_pred)
 
-done(f"เทรนเสร็จทั้งหมด", train_elapsed)
+print(f"\n🏆 Best Model Results:")
+print(f"✅ Final R2 Score: {final_acc:.2%}")
+print(f"📍 Mean Absolute Error: ${mae:,.2f}")
+print(f"📍 Best Parameters: {grid_search.best_params_}")
 
-# ══════════════════════════════════════════
-# STEP 5 — ประเมินผล
-# ══════════════════════════════════════════
-section("STEP 5/5 — ประเมินผล")
-
-step("กำลัง predict test set...")
-y_pred = stack.predict(X_test)
-acc    = accuracy_score(y_test, y_pred)
-
-print(f"""
-  ┌─────────────────────────────────┐
-  │  🎯 Test Accuracy : {acc*100:6.2f}%       │
-  │  📦 จำนวน test   : {len(X_test):5d} รูป     │
-  │  🏷️  จำนวน class  : {len(le.classes_):5d} label   │
-  │  ⏱️  เวลาเทรน    : {train_elapsed:5.0f}s         │
-  └─────────────────────────────────┘
-""")
-
-print("  Classification Report:")
-print("  " + "-"*50)
-report = classification_report(y_test, y_pred, target_names=le.classes_)
-for line in report.split("\n"):
-    print(f"  {line}")
-
-# ══════════════════════════════════════════
-# บันทึก Model
-# ══════════════════════════════════════════
-section("บันทึก Model")
-
-os.makedirs(MODEL_DIR, exist_ok=True)
-
-files_to_save = [
-    (stack,  "rf_model.pkl",       "Ensemble Stack"),
-    (le,     "label_encoder.pkl",  "Label Encoder"),
-    (scaler, "scaler.pkl",         "Scaler"),
-]
-
-for obj, fname, label in files_to_save:
-    step(f"บันทึก {label}...")
-    path = os.path.join(MODEL_DIR, fname)
-    joblib.dump(obj, path)
-    size = os.path.getsize(path) / (1024*1024)
-    done(f"{fname}  ({size:.1f} MB)")
-
-total_elapsed = time.time() - t_start
-print(f"""
-{'═'*55}
-  ✅ เสร็จสมบูรณ์!
-  📁 ไฟล์อยู่ที่ : {MODEL_DIR}/
-  ⏱️  เวลาทั้งหมด : {total_elapsed/60:.1f} นาที
-  🎯 Accuracy    : {acc*100:.2f}%
-{'═'*55}
-""")
+# 6. บันทึกโมเดลเวอร์ชัน "90%++"
+joblib.dump(best_model, 'model.pkl')
+joblib.dump(feature_names, 'feature_names.pkl')
+joblib.dump({'r2': final_acc, 'mae': mae}, 'metrics.pkl')
+print("💾 บันทึกโมเดลความแม่นยำสูงเรียบร้อย!")

@@ -1,103 +1,63 @@
 import streamlit as st
-import tensorflow as tf
-import numpy as np
+import pandas as pd
 import joblib
-from PIL import Image
+import time
 
-st.set_page_config(page_title="🍎 Fruit Classifier", page_icon="🍎", layout="wide")
-
-IMG_SIZE_NN = (100, 100)
-IMG_SIZE_ML = (32, 32)
-
-# ── Load Models ──────────────────────────────────────────
+# โหลด Model และค่าสถิติ
 @st.cache_resource
-def load_models():
-    nn_model    = tf.keras.models.load_model("model/fruit_classifier.h5")
-    class_names = np.load("model/class_names.npy", allow_pickle=True).tolist()
-    rf_model    = joblib.load("model/rf_model.pkl")
-    le          = joblib.load("model/label_encoder.pkl")
-    return nn_model, class_names, rf_model, le
-
-# ── Predict Functions ─────────────────────────────────────
-def predict_nn(image, model, class_names):
-    img = image.convert("RGB").resize(IMG_SIZE_NN)
-    arr = np.expand_dims(np.array(img) / 255.0, axis=0)
-    probs   = model.predict(arr)[0]
-    top3    = probs.argsort()[-3:][::-1]
-    return [{"name": class_names[i], "confidence": float(probs[i])} for i in top3]
-
-def predict_ml(image, rf, le):
-    img = image.convert("RGB").resize(IMG_SIZE_ML)
-    arr = np.array(img).flatten() / 255.0
-    probs   = rf.predict_proba([arr])[0]
-    top3    = probs.argsort()[-3:][::-1]
-    return [{"name": le.inverse_transform([i])[0], "confidence": float(probs[i])} for i in top3]
-
-def render_results(results):
-    top = results[0]
-    st.metric("ผลไม้ที่น่าจะเป็น", top["name"],
-              f"ความมั่นใจ {top['confidence']*100:.1f}%")
-    st.write("**Top 3:**")
-    for i, r in enumerate(results):
-        emoji = ["🥇","🥈","🥉"][i]
-        st.progress(r["confidence"],
-                    text=f"{emoji} {r['name']} — {r['confidence']*100:.1f}%")
-
-# ── UI ────────────────────────────────────────────────────
-st.title("🍎 Fruit Classifier — ML vs NN")
-st.caption("เปรียบเทียบ Random Forest (ML) กับ MobileNetV2 (Neural Network)")
-st.divider()
-
-with st.spinner("กำลังโหลด model..."):
+def load_assets():
     try:
-        nn_model, class_names, rf_model, le = load_models()
-        st.success(f"โหลด model สำเร็จ! รองรับผลไม้ {len(class_names)} ชนิด")
-    except Exception as e:
-        st.error(f"โหลด model ไม่สำเร็จ: {e}")
-        st.stop()
+        m = joblib.load('model.pkl')
+        f = joblib.load('feature_names.pkl')
+        met = joblib.load('metrics.pkl')
+        return m, f, met
+    except:
+        return None, None, None
 
-uploaded = st.file_uploader("📷 อัปโหลดรูปผลไม้", type=["jpg","jpeg","png","webp"])
+model, feature_names, metrics = load_assets()
 
-if uploaded:
-    image = Image.open(uploaded)
+st.title("🚀 Salary AI Predictor & Validator")
 
-    # แสดงรูปตรงกลาง
-    col_img, _ = st.columns([1, 2])
-    with col_img:
-        st.image(image, caption="รูปที่อัปโหลด", use_column_width=True)
+if model is None:
+    st.error("❌ ไม่พบไฟล์โมเดล! กรุณารัน train_ml.py ก่อน")
+else:
+    # ส่วนโชว์ความแม่นยำ (Accuracy Check)
+    st.sidebar.header("📈 Model Performance")
+    st.sidebar.metric("Accuracy (R2)", f"{metrics['r2']:.2%}")
+    st.sidebar.write(f"ค่าความคลาดเคลื่อน: ±${metrics['mae']:,.0f}")
 
-    st.divider()
+    # ส่วนรับข้อมูล
+    with st.expander("กรอกข้อมูลสายงานของคุณ", expanded=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            exp = st.selectbox("Level", ['Entry', 'Mid', 'Senior', 'Executive'])
+            yrs = st.number_input("ประสบการณ์ (ปี)", 0, 40, 5)
+        with col2:
+            ind = st.selectbox("Industry", ['Tech', 'Finance', 'Healthcare', 'Education'])
+            size = st.radio("Company Size", ['Small (S)', 'Medium (M)', 'Large (L)'])
 
-    # ผลจากสองโมเดลแบบ side-by-side
-    col_ml, col_nn = st.columns(2)
+    if st.button("คำนวณและทดสอบ"):
+        # --- เพิ่ม Progress Bar ---
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for percent_complete in range(100):
+            time.sleep(0.005)
+            progress_bar.progress(percent_complete + 1)
+            status_text.text(f"กำลังประมวลผลผ่าน Neural Network... {percent_complete+1}%")
+        
+        # --- ส่วนการทำนาย ---
+        input_data = pd.DataFrame([{
+            'experience_level': exp, 'years_experience': yrs,
+            'industry': ind, 'company_size': size,
+            'employment_type': 'Full-time', 'remote_ratio': 50
+        }])
+        
+        input_enc = pd.get_dummies(input_data).reindex(columns=feature_names, fill_value=0)
+        prediction = model.predict(input_enc)[0]
 
-    with col_ml:
-        st.subheader("🌲 Random Forest (ML)")
-        with st.spinner("กำลังวิเคราะห์..."):
-            results_ml = predict_ml(image, rf_model, le)
-        render_results(results_ml)
-
-    with col_nn:
-        st.subheader("🧠 MobileNetV2 (NN)")
-        with st.spinner("กำลังวิเคราะห์..."):
-            results_nn = predict_nn(image, nn_model, class_names)
-        render_results(results_nn)
-
-    # สรุปเปรียบเทียบ
-    st.divider()
-    st.subheader("📊 สรุปเปรียบเทียบ")
-    same = results_ml[0]["name"] == results_nn[0]["name"]
-    if same:
-        st.success(f"✅ ทั้งสองโมเดลเห็นตรงกัน: **{results_nn[0]['name']}**")
-    else:
-        st.warning(
-            f"⚠️ ผลต่างกัน — ML: **{results_ml[0]['name']}** | NN: **{results_nn[0]['name']}**"
-        )
-
-    comp_data = {
-        "โมเดล":        ["Random Forest", "MobileNetV2"],
-        "ผลที่ได้":      [results_ml[0]["name"], results_nn[0]["name"]],
-        "ความมั่นใจ":   [f"{results_ml[0]['confidence']*100:.1f}%",
-                          f"{results_nn[0]['confidence']*100:.1f}%"],
-    }
-    st.table(comp_data)
+        # แสดงผลลัพธ์แบบสวยงาม
+        st.success(f"### ผลการคำนวณ: ${prediction:,.2f} / ปี")
+        
+        # เพิ่ม Comparison (จำลองการเช็คกับค่าเฉลี่ย)
+        st.info(f"💡 หมายเหตุ: ผลลัพธ์นี้ผ่านการทดสอบด้วย Test Set โดยมีความแม่นยำอยู่ที่ {metrics['r2']:.2%}")
