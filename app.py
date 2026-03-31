@@ -234,7 +234,7 @@ def run_fruit(img, top_k=5):
 # Sidebar
 # ─────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("## 🧠 ML Studio")
+    st.markdown("##  Intelligent System Project")
     st.markdown("---")
     page = st.radio("เมนู", [
         "📖 อธิบายโมเดล ML",
