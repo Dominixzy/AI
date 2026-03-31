@@ -1,6 +1,10 @@
 streamlit
+pandas
+numpy
+joblib
+Pillow
 tensorflow
 scikit-learn
-numpy
-Pillow
-joblib
+xgboost
+lightgbm
+catboost
